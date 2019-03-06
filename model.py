@@ -15,6 +15,7 @@ import random
 import time
 import os
 from mdn2 import *
+from window import *
 
 import tensorflow as tf
 
@@ -30,12 +31,15 @@ class Model():
         self.learning_rate = args['learning_rate']
         self.tsteps = args['tsteps']
         self.num_mixtures = args['num_mixtures']
+        self.window_mixtures = args['window_mixtures']
         self.rnn_size = args['rnn_size']
         self.batch_size = args['batch_size']
         self.biases = args['biases']
         self.grad_clip = args['grad_clip']
         self.keep_prob = args['keep_prob'] 
         self.train = args['train']
+        self.char_steps = args['tsteps'] / args['tsteps_per_char']
+        self.vocab_len = len(args['alphabet']) + 1
         
         # Build an LSTM cell, each cell has rnn_size number of units
         with tf.variable_scope(tf.get_variable_scope(),reuse=False):
@@ -70,6 +74,32 @@ class Model():
             return [output, cell_final_state]
         
         outs_layer0, self.cell0_final_state = build_computational_graph(self, input_to_model, self.cell0, self.istate_cell0, 'cell0')
+        
+        # Send output of cell 0 to attention window.
+        self.kappa_start = tf.placeholder(dtype = tf.float32, shape = [None, self.window_mixtures, 1])
+        self.char_seq = tf.placeholder(dtype = tf.float32, shape = [None, self.char_steps, self.vocab_len])
+        
+        prev_kappa = self.kappa_start
+        prev_window = self.char_seq[:,0,:]
+        reuse = False
+        
+        for i in range(len(outs_layer0)):
+            alpha, beta, kappa = get_window_coefficients(outs_layer0[i], self.window_mixtures, prev_kappa, self.initializer, reuse)
+            window, phi = build_gaussian_window(alpha, beta, kappa, self.char_seq)
+            # Concatenating output of first hidden layer with window and input to send to second layer.
+            outs_layer0[i] = tf.concat((outs_layer0[i], window), 1)
+            outs_layer0[i] = tf.concat((outs_layer0[i], input_to_model[i]), 1)
+            prev_kappa = kappa
+            prev_window = window
+            reuse = True
+            
+        #save some attention mechanism params.
+        self.window = window
+        self.phi = phi # Window Weight of c 
+        self.kappa = kappa # Controls location
+        self.alpha = alpha # Stores importance of window within mixture
+        self.beta = beta # Controls width
+        
         outs_layer1, self.cell1_final_state = build_computational_graph(self, outs_layer0, self.cell1, self.istate_cell1, 'cell1')
         outs_layer2, self.cell2_final_state = build_computational_graph(self, outs_layer1, self.cell2, self.istate_cell2, 'cell2')
         
