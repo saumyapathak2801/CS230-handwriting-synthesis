@@ -29,11 +29,11 @@ class Model():
         self.args = args
         self.initializer = tf.truncated_normal_initializer(mean=0., stddev=.075, seed=None, dtype=tf.float32)
         self.learning_rate = args['learning_rate']
-        self.tsteps = args['tsteps']
+        self.tsteps = args['tsteps'] if args['train'] else 1
         self.num_mixtures = args['num_mixtures']
         self.window_mixtures = args['window_mixtures']
         self.rnn_size = args['rnn_size']
-        self.batch_size = args['batch_size']
+        self.batch_size = args['batch_size'] if args['train'] else 1
         self.biases = args['biases']
         self.grad_clip = args['grad_clip']
         self.keep_prob = args['keep_prob'] 
@@ -56,15 +56,15 @@ class Model():
         self.sess.run(tf.global_variables_initializer())
         
         # Placeholders for input and output data, each entry has tsteps points at a time
-        self.input = tf.placeholder(dtype=tf.float32, shape=[None, args['tsteps'], 3])
-        self.output = tf.placeholder(dtype=tf.float32, shape=[None, args['tsteps'], 3])
+        self.input = tf.placeholder(dtype=tf.float32, shape=[None, self.tsteps, 3])
+        self.output = tf.placeholder(dtype=tf.float32, shape=[None, self.tsteps, 3])
         
         # Setting the states of memory cells in each LSTM cell.
         # batch_size is the number of training examples in a batch. Each training example is a set of tsteps number of
         # (x,y, <end_of_stroke>) tuples, i.e. a sequence of strokes till t time steps.
-        self.istate_cell0 = self.cell0.zero_state(batch_size=args['batch_size'], dtype=tf.float32)
-        self.istate_cell1 = self.cell1.zero_state(batch_size=args['batch_size'], dtype=tf.float32)
-        self.istate_cell2 = self.cell2.zero_state(batch_size=args['batch_size'], dtype=tf.float32)
+        self.istate_cell0 = self.cell0.zero_state(batch_size=self.batch_size, dtype=tf.float32)
+        self.istate_cell1 = self.cell1.zero_state(batch_size=self.batch_size, dtype=tf.float32)
+        self.istate_cell2 = self.cell2.zero_state(batch_size=self.batch_size, dtype=tf.float32)
         
         # Input to model is a set of batch_size number of training samples. Step below splits by tsteps, giving one element in a tstep worth in each batch
         input_to_model = [tf.squeeze(input_, [1]) for input_ in tf.split(self.input, self.tsteps, 1)]

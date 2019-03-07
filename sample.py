@@ -24,7 +24,7 @@ def sample(input_text, model, args):
     kappa = np.zeros((1, args['window_mixtures'], 1))
     
     # Convert input string to one hot.
-    input_oh = convert_to_one_hot(input_text, model.char_steps, args['alphabet'])
+    input_oh = [convert_to_one_hot(input_text, model.char_steps, args['alphabet'])]
 
     prev_x = np.asarray([[[0, 0, 1]]], dtype=np.float32)     # start with a pen stroke at (0,0)
     strokes, pis, char_to_plot, windows, kappas, phis = [], [], [], [], [], [] 
