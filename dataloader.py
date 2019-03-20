@@ -15,7 +15,7 @@ import tensorflow as tf
 get_ipython().run_line_magic('matplotlib', 'inline')
 
 
-# In[2]:
+# In[15]:
 
 
 class DataProcess():
@@ -26,11 +26,14 @@ class DataProcess():
         self.timesteps = args['tsteps']
         self.scale_factor = args['scale_factor']
         self.gap = args['gap']
+        self.char_steps = args['tsteps']/args['tsteps_per_char']
+        self.alphabet = args['alphabet']
         
         
-        stroke_dir = self.rootDir
+        stroke_dir = self.rootDir + "/lineStrokes"
+        ascii_dir = self.rootDir + "/ascii"
         data_file = os.path.join(self.rootDir, "strokes_training_data.cpkl")
-        self.process(stroke_dir, data_file)
+        self.process(stroke_dir, ascii_dir, data_file)
         self.read_processed(data_file)
         self.init_batch_comp()
     
@@ -38,11 +41,13 @@ class DataProcess():
     def read_processed(self, data_file):
         # Opening in read mode
         f = open(data_file, 'rb')
-        self.raw_stroke_data = pickle.load(f)
+        [self.raw_stroke_data, self.raw_ascii_data] = pickle.load(f)
         f.close()
         
         self.valid_stroke_data = []
         self.stroke_data = []
+        self.ascii_data = []
+        self.valid_ascii_data = []
         
         for i in range(len(self.raw_stroke_data)):
             data = self.raw_stroke_data[i]
@@ -50,15 +55,31 @@ class DataProcess():
                 # removes large gaps from the data
                 data = np.minimum(data, self.gap)
                 data = np.maximum(data, -self.gap)
+                data = np.array(data, dtype = np.float32)
                 data[:,0:2] /= self.scale_factor
                 if i%20 == 0:
                     self.valid_stroke_data.append(data)
+                    self.valid_ascii_data.append(self.raw_ascii_data[i])
                 else:
                     self.stroke_data.append(data)
+                    self.ascii_data.append(self.raw_ascii_data[i])
         self.num_batches = int(len(self.stroke_data)/self.batch_size)
+        print("Number of valid data examples:",  len(self.valid_stroke_data))
         print("Number of data examples:",  len(self.stroke_data))
-        print("Batch size for dataset", self.num_batches)
-
+        print("Batch size for dataset", self.num_batches) 
+        
+    def get_validation_data(self):
+        x_valid = []
+        y_valid = []
+        ascii_list = []
+        for i in range(self.batch_size):
+            index = i%len(self.valid_stroke_data)
+            data = self.valid_stroke_data[index]
+            x_valid.append(np.copy(data[:self.timesteps]))
+            y_valid.append(np.copy(data[1:self.timesteps+1]))
+            ascii_list.append(self.valid_ascii_data[index])
+        asciis_oh = [convert_to_one_hot(s, self.char_steps, self.alphabet) for s in ascii_list]
+        return x_valid, y_valid, ascii_list, asciis_oh
         
     def init_batch_comp(self):
         self.index_perm = np.random.permutation(len(self.stroke_data))
@@ -68,18 +89,21 @@ class DataProcess():
         # Iterate for batch_size times to get a batch of batch_size points
         x_batch = []
         y_batch = []
+        asciis = []
         for i in range(self.batch_size):
             # Pick strokes data randomly from each file
             data = self.stroke_data[self.index_perm[self.index_pointer]]
             x_batch.append(np.copy(data[:self.timesteps]))
             y_batch.append(np.copy(data[1:self.timesteps+1]))
+            asciis.append(self.ascii_data[self.index_perm[self.index_pointer]])
             self.index_pointer += 1
             if(self.index_pointer >= len(self.stroke_data)):
-                self.init_batch_comp()          
-        return x_batch, y_batch         
+                self.init_batch_comp()
+        asciis_oh = [convert_to_one_hot(s, self.char_steps, self.alphabet) for s in asciis]        
+        return x_batch, y_batch, asciis, asciis_oh
             
         
-    def process(self, rootDir, data_file):
+    def process(self, rootDir, asciiDir, data_file):
         # Function that outputs linestrokes given filepath.    
         def convert_linestroke_file_to_array(filepath):
             strokeFile = ET.parse(filepath)
@@ -91,7 +115,6 @@ class DataProcess():
                 x_min_offset = min(x_min_offset, float(root[0][i].attrib['x']))
                 y_min_offset = min(y_min_offset, float(root[0][i].attrib['y']))
                 y_height = max(y_height, float(root[0][i].attrib['y']))
-            #TODO(add normalization)
             y_height -= y_min_offset
             x_min_offset -=100.0
             y_min_offset -=100.0
@@ -112,6 +135,17 @@ class DataProcess():
                 for file in filenames:
                     filePaths.append(os.path.join(dirpath, file))
             return filePaths
+        
+        def get_ascii(filename, linenumber):
+            with open(filename, "r") as f:
+                s = f.read()
+            csr = s.find("CSR")    
+            s = s[csr:]
+            if len(s.split("\n")) > line_number+2:
+                s = s.split("\n")[line_number+2]
+                return s
+            else:
+                return ""
 
         
     # Function to convert strokes to inputStrokeMatrix
@@ -134,19 +168,29 @@ class DataProcess():
         
         allFiles = get_all_files()
         strokes = []
+        asciis = []
         counter = 0
         for file in allFiles:
-            if file[-3:] == "xml" and 'a' in file:
+            if file[-3:] == "xml": #and 'a0' in file:
                 counter = counter + 1
                 stroke = strokes_to_input_matrix(convert_linestroke_file_to_array(file))
-                strokes.append(stroke)
-            assert len(strokes) == counter    
+                # Getting corresponding ascii file and line number for stroke.
+                ascii_filename = file.replace("lineStrokes", "ascii")[:-7] + ".txt"
+                line_number = file[-6:-4]
+                line_number = int(line_number) - 1
+                c = get_ascii(ascii_filename, line_number)
+                if (len(c) > 10):
+                    asciis.append(c)
+                    strokes.append(stroke)    
+        assert len(strokes) == len(asciis)
         f = open(data_file,"wb")
-        pickle.dump(strokes, f, protocol=2)
+        pickle.dump([strokes, asciis], f, protocol=2)
         f.close()
         print("Saved {} lines", len(strokes))
+         
         
-def to_one_hot(s, ascii_steps, alphabet):
+def convert_to_one_hot(s, ascii_steps, alphabet):
+    ascii_steps = int(ascii_steps)
     steplimit=3e3; s = s[:3e3] if len(s) > 3e3 else s # clip super-long strings
     seq = [alphabet.find(char) + 1 for char in s]
     if len(seq) >= ascii_steps:
@@ -157,19 +201,42 @@ def to_one_hot(s, ascii_steps, alphabet):
     one_hot[np.arange(ascii_steps),seq] = 1
     return one_hot
     
-                
+def line_plot(strokes, title):
+    plt.figure(figsize=(20,2))
+    eos_preds = np.where(strokes[:,-1] == 1)
+    eos_preds = [0] + list(eos_preds[0]) + [-1] #add start and end indices
+    for i in range(len(eos_preds)-1):
+        start = eos_preds[i]+1
+        stop = eos_preds[i+1]
+        plt.plot(strokes[start:stop,0], strokes[start:stop,1],'b-', linewidth=2.0)
+    plt.title(title)
+    plt.gca().invert_yaxis()
+    plt.show()                
 
 
-# In[ ]:
+# In[16]:
 
 
+# args = {}
+# args['batch_size'] = 3
+# args['tsteps'] = 100
+# args['scale_factor'] = 2
+# args['gap'] = 4
+# args['tsteps_per_char'] = 10
+# args['alphabet'] = 'abcdefgh'
+# D = DataProcess(args)
 
 
-
-# In[ ]:
-
+# In[17]:
 
 
+# x, y , asciis, asciis_oh = D.get_next_batch()
+
+
+# # In[20]:
+
+
+# print(asciis)
 
 
 # In[ ]:

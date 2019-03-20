@@ -3,9 +3,13 @@
 
 # In[ ]:
 
-
 import numpy as np
 import tensorflow as tf
+import pickle
+import os as os
+import sys
+
+from dataloader import *
 
 def sample_gaussian2d(mu1, mu2, s1, s2, rho):
     mean = [mu1, mu2]
@@ -13,21 +17,52 @@ def sample_gaussian2d(mu1, mu2, s1, s2, rho):
     x = np.random.multivariate_normal(mean, cov, 1)
     return x[0][0], x[0][1]
 
-
-def sample(model, args):
-    # initialize some parameters
-    args['tsteps'] = 1000 # produce tsteps worth of samples
+def get_stroke_styles(model, args):
     c0, c1, c2 = model.istate_cell0.c.eval(), model.istate_cell1.c.eval(), model.istate_cell2.c.eval()
     h0, h1, h2 = model.istate_cell0.h.eval(), model.istate_cell1.h.eval(), model.istate_cell2.h.eval()
+    if args['style'] is -1: return [c0, c1, c2, h0, h1, h2] #model 'chooses' random style
+    print(sys.getdefaultencoding())
+    
+    with open(os.path.join(args['data_dir'], 'styles.p'), 'rb') as f:
+        stroke_styles, style_strings = pickle.load(f, encoding="latin1")
+        
+    stroke_styles, style_strings = stroke_styles[args['style']] , style_strings[args['style']]
+    onehot_style = [convert_to_one_hot(style_strings, model.char_steps, args['alphabet'])]
+    
+    stroke_style = np.zeros((1,1,3), dtype = np.float32)
+    stroke_style_kappa = np.zeros((1, args['window_mixtures'], 1))
+    
+    prime_len = 500
+    
+    for i in range(prime_len):
+        stroke_style[0][0] = stroke_styles[i,:]
+        feed = {model.input: stroke_style, model.char_seq: onehot_style, model.kappa_start: stroke_style_kappa, \
+                model.istate_cell0.c: c0, model.istate_cell1.c: c1, model.istate_cell2.c: c2, \
+                model.istate_cell0.h: h0, model.istate_cell1.h: h1, model.istate_cell2.h: h2}
+        fetch = [model.kappa, \
+                 model.cell0_final_state.c, model.cell1_final_state.c, model.cell2_final_state.c,
+                 model.cell0_final_state.h, model.cell1_final_state.h, model.cell2_final_state.h]
+        [stroke_style_kappa, c0, c1, c2, h0, h1, h2] = model.sess.run(fetch, feed)
+    return [c0, c1, c2, np.zeros_like(h0), np.zeros_like(h1), np.zeros_like(h2)]     
+    
+
+def sample(input_text, model, args):
+    # initialize some parameters
+    # args['tsteps'] = 1000 # produce tsteps worth of samples
+    [c0, c1, c2, h0, h1, h2] = get_stroke_styles(model, args)
+    kappa = np.zeros((1, args['window_mixtures'], 1))
+    
+    # Convert input string to one hot.
+    input_oh = [convert_to_one_hot(input_text, model.char_steps, args['alphabet'])]
 
     prev_x = np.asarray([[[0, 0, 1]]], dtype=np.float32)     # start with a pen stroke at (0,0)
-    strokes, pis, char_to_plot = [], [], [] 
-    
+    strokes, pis, char_to_plot, windows, kappas, phis = [], [], [], [], [], [] 
+
     finished = False ; i = 0
     while not finished:
-        feed = {model.input: prev_x,                 model.istate_cell0.c: c0, model.istate_cell1.c: c1, model.istate_cell2.c: c2,                 model.istate_cell0.h: h0, model.istate_cell1.h: h1, model.istate_cell2.h: h2}
-        fetch = [model.pi_hat, model.mu1, model.mu2, model.sigma1_hat, model.sigma2_hat, model.rho, model.eos,                  model.cell0_final_state.c, model.cell1_final_state.c, model.cell2_final_state.c,                 model.cell0_final_state.h, model.cell1_final_state.h, model.cell2_final_state.h]
-        [pi_hat, mu1, mu2, sigma1_hat, sigma2_hat, rho, eos,                  c0, c1, c2, h0, h1, h2] = model.sess.run(fetch, feed)
+        feed = {model.input: prev_x, model.char_seq: input_oh, model.kappa_start: kappa,                 model.istate_cell0.c: c0, model.istate_cell1.c: c1, model.istate_cell2.c: c2,                 model.istate_cell0.h: h0, model.istate_cell1.h: h1, model.istate_cell2.h: h2}
+        fetch = [model.pi_hat, model.mu1, model.mu2, model.sigma1_hat, model.sigma2_hat, model.rho, model.eos,                  model.window, model.phi, model.kappa, model.alpha,                  model.cell0_final_state.c, model.cell1_final_state.c, model.cell2_final_state.c,                 model.cell0_final_state.h, model.cell1_final_state.h, model.cell2_final_state.h]
+        [pi_hat, mu1, mu2, sigma1_hat, sigma2_hat, rho, eos,                  window, phi, kappa, alpha,                  c0, c1, c2, h0, h1, h2] = model.sess.run(fetch, feed)
         
         # bias
         sigma1 = np.exp(sigma1_hat - args['biases']) ; sigma2 = np.exp(sigma2_hat - args['biases']) # eqn 61 and 62
@@ -38,11 +73,16 @@ def sample(model, args):
         # choose a component from the MDN
         idx = np.random.choice(pi.shape[1], p=pi[0])
         a = eos[0][0]
-        eos = 1 if 0.02 < eos[0][0] else 0 # use 0.5 as arbitrary boundary
+        eos = 1 if 0.4 < eos[0][0] else 0 # use an arbitrary boundary for detecting eos
         x1, x2 = sample_gaussian2d(mu1[0][idx], mu2[0][idx], sigma1[0][idx], sigma2[0][idx], rho[0][idx])
         
+        # Append MDN information at every timestep
+        windows.append(window)
+        phis.append(phi[0])
+        kappas.append(kappa[0].T)
+        
+        
         pis.append(pi[0])
-        print([mu1[0][idx], mu2[0][idx], sigma1[0][idx], sigma2[0][idx], rho[0][idx], a])
         strokes.append([mu1[0][idx], mu2[0][idx], sigma1[0][idx], sigma2[0][idx], rho[0][idx], eos])
         char_to_plot.append([x1, x2, eos])
         
@@ -53,13 +93,16 @@ def sample(model, args):
         prev_x[0][0] = np.array([x1, x2, eos], dtype=np.float32)
         i+=1
 
+    windows = np.vstack(windows)
+    phis = np.vstack(phis)
+    kappas = np.vstack(kappas)
     strokes = np.vstack(strokes)
     char_to_plot = np.vstack(char_to_plot)
 
     # the network predicts the displacements between pen points, so do a running sum over the time dimension
     strokes[:,:2] = np.cumsum(strokes[:,:2], axis=0)
     char_to_plot[:,:2] = np.cumsum(char_to_plot[:,:2], axis=0)
-    return strokes, char_to_plot
+    return strokes, char_to_plot, phis, windows, kappas
 
 def bivariate_normal(X, Y, sigmax=1.0, sigmay=1.0,
                      mux=0.0, muy=0.0, sigmaxy=0.0):
@@ -77,6 +120,26 @@ def bivariate_normal(X, Y, sigmax=1.0, sigmay=1.0,
     denom = 2*np.pi*sigmax*sigmay*np.sqrt(1-rho**2)
     return np.exp(-z/(2*(1-rho**2))) / denom
 
+def window_plots(phis, windows, save_path='.'):
+    import matplotlib.cm as cm
+    import matplotlib as mpl
+    mpl.use('Agg')
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(16,4))
+    plt.subplot(121)
+    plt.title('Phis', fontsize=20)
+    plt.xlabel("ascii #", fontsize=15)
+    plt.ylabel("time steps", fontsize=15)
+    plt.imshow(phis, interpolation='nearest', aspect='auto', cmap=cm.jet)
+    plt.subplot(122)
+    plt.title('Soft attention window', fontsize=20)
+    plt.xlabel("one-hot vector", fontsize=15)
+    plt.ylabel("time steps", fontsize=15)
+    plt.imshow(windows, interpolation='nearest', aspect='auto', cmap=cm.jet)
+    plt.savefig(save_path)
+    plt.clf() ; plt.cla()
+
+
 # plots the stroke data (handwriting!)
 def line_plot_coef(strokes, title, figsize = (20,2), save_path='.'):
     import matplotlib as mpl
@@ -88,7 +151,7 @@ def line_plot_coef(strokes, title, figsize = (20,2), save_path='.'):
     for i in range(len(eos_preds)-1):
         start = eos_preds[i]+1
         stop = eos_preds[i+1]
-        plt.plot(strokes[start:stop,0], strokes[start:stop,1],'b-', linewidth=2.0) 
+        plt.plot(strokes[start:stop,0], strokes[start:stop,1],'b-', linewidth=2.0) #draw a stroke
     plt.title(title,  fontsize=20)
     plt.gca().invert_yaxis()
     plt.savefig(save_path)
@@ -104,7 +167,7 @@ def line_plot_char(strokes, char_to_plot, title, figsize = (20,2), save_path='.'
     for i in range(len(eos_preds)-1):
         start = eos_preds[i]+1
         stop = eos_preds[i+1]
-        plt.plot(char_to_plot[start:stop,0], char_to_plot[start:stop,1],'b-', linewidth=2.0) 
+        plt.plot(char_to_plot[start:stop,0], char_to_plot[start:stop,1],'b-', linewidth=2.0) #draw a stroke
     plt.title(title,  fontsize=20)
     plt.gca().invert_yaxis()
     plt.savefig(save_path)
